@@ -1,0 +1,680 @@
+---
+title: Modelled potential avoidable activity by 2035-36, Birmingham & Solihull ICB
+author:
+  name: Fran Barton
+  email: franbarton@gmail.com
+date: 16 July 2025
+lang: en-GB
+theme: lumen
+embed-resources: true
+minimal: true
+fig-dpi: 96
+fig-height: 10
+fig-width: 16.18
+fig-responsive: true
+lightbox: true
+out-width: 92%
+knitr:
+  opts_chunk:
+    dev: ragg_png
+    message: false
+execute:
+  echo: false
+  warning: true
+df-print: paged
+mainfont: Fira Sans
+---
+
+
+```{r setup}
+withr::with_options(list(verbose = FALSE), {
+  purrr::walk(dir("R", "\\.R$"), \(x) source(here::here("R", x)))
+})
+
+# This qmd file assumes that model runs have been done and results have been
+# produced on Azure for all necessary schemes and scenarios.
+# See `init_create_and_post_custom_params.R` for steps to do this, if not.
+
+uhb_code <- "RRK"
+swb_code <- "RXK"
+schemes <- c(uhb_code, swb_code)
+uhb_sites <- c("RRK02", "RRK15", "RRK97", "RRK98", "RRK99")
+mmu_code <- "I3W1A"
+# RRK02 is a secondary site code for QEH, this will be merged into RRK15
+five_sites <- setdiff(c(uhb_sites, mmu_code), "RRK02") |>
+  rlang::set_names(c("QEH", "Heartlands", "Good Hope", "Solihull", "SWB"))
+
+scenarios <- c("steady", "planned", "ambitious")
+mitigator_lookup <- readr::read_rds(here::here("mitigator_lookup.rds"))
+
+scenario_colours <- StrategyUnitTheme::su_theme_pal()(3)[c(2, 3, 1)] |>
+  rlang::set_names(scenarios)
+
+```
+
+```{r helper functions}
+add_site_names <- function(tbl) {
+  lookup <- tibble::enframe(five_sites, "site_name", "site")
+  dplyr::left_join(tbl, lookup, "site") |>
+    dplyr::relocate("site_name", .after = "site")
+}
+
+
+#' Filter tibbles to data related to BSol project focus sites only
+filter_to_sites <- function(tbl) {
+  tbl |>
+    dplyr::filter(
+      .data[["site"]] %in%
+        {{ uhb_sites }} |
+        .data[["dataset"]] == {{ swb_code }}
+    ) |>
+    dplyr::mutate(dplyr::across("site", \(x) {
+      dplyr::case_when(
+        .data[["dataset"]] == {{ swb_code }} ~ mmu_code, # unify all SWB sites
+        x == "RRK02" ~ "RRK15", # unify 2 site codes for QEH
+        .default = x
+      )
+    }))
+}
+
+convert_sites_to_trusts <- function(tbl) {
+  tbl |>
+    dplyr::mutate(dplyr::across("site", \(x) {
+      dplyr::if_else(x == {{ mmu_code }}, "SWB", "UHB")
+    }))
+}
+
+add_year_col <- function(tbl, col_name = "estimate") {
+  tbl |>
+    dplyr::mutate(
+      year = dplyr::if_else(.data[[col_name]] == "baseline", 2022L, 2035L),
+      .after = {{ col_name }}
+    )
+}
+
+#' Recalculate bed days to "midnight bed days", that is: a day case admission
+#' (admitted and discharged on same day) will now count as 0 bed days instead of
+#' 1; someone discharged the day after admission (LoS 1) will be 1 bed day not 2
+align_beddays_count <- function(tbl) {
+  tbl |>
+    tidyr::pivot_wider(names_from = "measure") |>
+    dplyr::mutate(dplyr::across("beddays", \(x) x - .data[["admissions"]])) |>
+    tidyr::pivot_longer(
+      c("admissions", "beddays"),
+      names_to = "measure",
+      values_drop_na = TRUE
+    )
+}
+
+```
+
+```{r read in results data}
+#| eval: false
+
+compile_required_dataset <- function(scenario) {
+  reqd_tbls <- c("default", "step_counts")
+  read_pqt_tables <- \(...) read_results_pqt(..., tables = reqd_tbls)
+  schemes |>
+    purrr::map(\(x) read_pqt_tables(x, {{ scenario }})) |>
+    purrr::list_transpose() |>
+    purrr::map(dplyr::bind_rows) |>
+    purrr::map(filter_to_sites)
+}
+
+full_dataset <- purrr::map(scenarios, compile_required_dataset) |>
+  rlang::set_names(scenarios)
+
+readr::write_rds(full_dataset, "full_dataset.rds")
+
+```
+
+```{r data table preparation functions}
+calculate_default_principal <- function(tbl) {
+  tbl |>
+    dplyr::filter(
+      # we only care about inpatient activity
+      dplyr::if_any("pod", \(x) grepl("^ip_", x)) &
+        # excludes procedures
+        dplyr::if_any("measure", \(x) x %in% c("admissions", "beddays"))
+    ) |>
+    dplyr::summarise(
+      dplyr::across("value", sum),
+      .by = c("site", "model_run", "measure")
+    ) |>
+    align_beddays_count() |>
+    dplyr::mutate(
+      estimate = ifelse(.data[["model_run"]] == 0, "baseline", "horizon")
+    ) |>
+    dplyr::summarise(
+      principal = mean(.data[["value"]]),
+      p10 = quantile(.data[["value"]], 0.1),
+      p90 = quantile(.data[["value"]], 0.9),
+      .by = c("site", "estimate", "measure")
+    ) |>
+    add_year_col() |>
+    add_site_names()
+}
+
+
+calculate_stepcounts_principal <- function(tbl) {
+  tbl |>
+    dplyr::filter(
+      # we only care about inpatient activity
+      dplyr::if_any("activity_type", \(x) x == "ip") &
+        # excludes procedures
+        dplyr::if_any("measure", \(x) x %in% c("admissions", "beddays")) &
+        dplyr::if_any("change_factor", \(x) x != "covid_adjustment")
+    ) |>
+    dplyr::summarise(
+      dplyr::across("value", sum),
+      .by = c("site", "measure", "model_run", "change_factor")
+    ) |>
+    tidyr::pivot_wider(names_from = "change_factor") |>
+    tidyr::pivot_longer(
+      tidyselect::matches("(adjustment|avoidance|efficiencies|term)$")
+    ) |>
+    dplyr::summarise(
+      # just add up all change factors for each run (?)
+      dplyr::across("value", sum),
+      .by = c("site", "measure", "baseline", "model_run")
+    ) |>
+    align_beddays_count() |>
+    dplyr::summarise(
+      principal = mean(.data[["value"]]),
+      p10 = quantile(.data[["value"]], 0.1),
+      p90 = quantile(.data[["value"]], 0.9),
+      .by = c("site", "measure", "baseline")
+    ) |>
+    dplyr::mutate(dplyr::across(c("principal", "p10", "p90"), \(x) {
+      x + .data[["baseline"]]
+    })) |>
+    tidyr::pivot_longer(!c("site", "measure"), names_to = "estimate") |>
+    add_site_names() |>
+    add_year_col()
+}
+
+calculate_stepcounts_mitigation <- function(tbl) {
+  factors <- c("activity_avoidance", "baseline", "efficiencies")
+  aait <- "activity_avoidance_interaction_term"
+  tbl |>
+    dplyr::filter(
+      # we only care about inpatient activity
+      dplyr::if_any("activity_type", \(x) x == "ip") &
+        # excludes procedures
+        dplyr::if_any("measure", \(x) x %in% c("admissions", "beddays")) &
+        dplyr::if_any("strategy", \(x) !(x %in% c("-", aait))) &
+        dplyr::if_any("change_factor", \(x) x %in% {{ factors }})
+    ) |>
+    dplyr::summarise(
+      dplyr::across("value", sum),
+      .by = c("site", "measure", "strategy", "change_factor", "model_run")
+    ) |>
+    align_beddays_count() |>
+    dplyr::summarise(
+      principal = mean(.data[["value"]]),
+      p10 = quantile(.data[["value"]], 0.1),
+      p90 = quantile(.data[["value"]], 0.9),
+      .by = c("site", "measure", "strategy", "change_factor")
+    ) |>
+    add_site_names() |>
+    dplyr::left_join(mitigator_lookup, c("strategy", "change_factor")) |>
+    dplyr::relocate("strategy_name", .after = "strategy")
+}
+
+```
+
+
+```{r prepare data for plots}
+full_dataset <- readr::read_rds("full_dataset.rds")
+
+default_data <- full_dataset |>
+  purrr::list_transpose() |>
+  purrr::pluck("default") |>
+  purrr::map_df(calculate_default_principal, .id = "scenario")
+
+default_data_overall_by_scheme <- full_dataset |>
+  purrr::list_transpose() |>
+  purrr::pluck("default") |>
+  purrr::map(convert_sites_to_trusts) |>
+  purrr::map_df(calculate_default_principal, .id = "scenario") |>
+  dplyr::mutate(site_name = .data[["site"]])
+
+jaws_data <- full_dataset |>
+  purrr::list_transpose() |>
+  purrr::pluck("step_counts") |>
+  purrr::map_df(calculate_stepcounts_principal, .id = "scenario")
+
+bar_data <- full_dataset |>
+  purrr::keep_at(c("planned", "ambitious")) |>
+  purrr::list_transpose() |>
+  purrr::pluck("step_counts") |>
+  purrr::map(convert_sites_to_trusts) |>
+  purrr::map_df(calculate_stepcounts_mitigation, .id = "scenario")
+
+level_data <- default_data |>
+  dplyr::mutate(dplyr::across("principal", round)) |>
+  tidyr::pivot_longer(c("principal", "p10", "p90")) |>
+  dplyr::filter(.data[["year"]] == 2035 & .data[["name"]] == "principal") |>
+  tidyr::pivot_wider(names_from = "scenario") |>
+  dplyr::mutate(
+    planned_mitig = .data[["planned"]] - .data[["steady"]],
+    ambitious_mitig = .data[["ambitious"]] - .data[["steady"]],
+    planned_mitig_pct = .data[["planned_mitig"]] / .data[["steady"]],
+    ambitious_mitig_pct = .data[["ambitious_mitig"]] / .data[["steady"]]
+  ) |>
+  dplyr::select(!c("site", "year", "estimate", "name", all_of(scenarios))) |>
+  dplyr::rename_with(\(x) sub("mitig_", "", sub("mitig$", "delta", x))) |>
+  tidyr::pivot_longer(
+    cols = !c("site_name", "measure"),
+    names_to = c("scenario", "name"),
+    names_sep = "_"
+  ) |>
+  tidyr::pivot_wider()
+
+pod_data <- full_dataset |>
+  purrr::pluck("steady", "default") |>
+  dplyr::filter(
+    .data[["model_run"]] == 0 & # baseline
+      .data[["measure"]] %in% c("admissions", "beddays")
+  ) |>
+  add_site_names() |>
+  dplyr::summarise(
+    dplyr::across("value", sum),
+    .by = c("site", "site_name", "measure", "pod")
+  ) |>
+  dplyr::mutate(
+    total = sum(.data[["value"]]),
+    .by = c("site", "measure")
+  ) |>
+  dplyr::mutate(
+    pct = round((.data[["value"]] / .data[["total"]]) * 100, 1),
+    .by = c("site", "measure", "pod")
+  ) |>
+  dplyr::select(!"total")
+
+
+```
+
+```{r export to xlsx}
+#| eval: false
+default_data_overall_by_scheme |>
+  dplyr::rename(trust = "site") |>
+  openxlsx2::write_xlsx("principal_data_by_trust.xlsx", as_table = TRUE)
+default_data |>
+  openxlsx2::write_xlsx("principal_data_by_site.xlsx", as_table = TRUE)
+bar_data |>
+  dplyr::rename(trust = "site") |>
+  openxlsx2::write_xlsx("mitigator_data_by_trust.xlsx", as_table = TRUE)
+
+```
+
+```{r plot functions}
+plot_slope_graph <- function(default_data, site, measure) {
+  scenario_labels <- c("Steady state", "Planned", "Ambitious") |>
+    rlang::set_names(scenarios)
+
+  k_labeller <- scales::label_number(1, scale_cut = scales::cut_short_scale())
+  num_labeller <- scales::label_number(0.1, scale_cut = scales::cut_short_scale())
+
+  baseline_level <- default_data |>
+    dplyr::filter(.data[["year"]] == 2022L) |>
+    dplyr::pull("principal") |>
+    unique()
+  assertthat::assert_that(rlang::is_double(baseline_level, 1))
+  bss <- k_labeller(baseline_level)
+
+  plot_title <- glue::glue(
+    "{site}: Projected {measure} from baseline of {bss} in 2022/23"
+  )
+
+  label_data <- default_data |>
+    dplyr::filter(.data[["year"]] == 2035) |>
+    tidyr::pivot_longer(c("principal", "p10", "p90")) |>
+    dplyr::mutate(label = num_labeller(.data[["value"]])) |>
+    tidyr::pivot_wider(
+      values_from = c("value", "label"),
+      names_glue = "{name}_{.value}"
+    ) |>
+    dplyr::rename_with(\(x) sub("_value", "", x))
+  y_nudge <- abs(unique((label_data[["p10"]] - label_data[["principal"]]) / 11))
+  fct_scnr <- "forcats::fct(scenario, scenarios)"
+  p <- default_data |>
+    ggplot2::ggplot(
+      ggplot2::aes(
+        .data[["year"]],
+        .data[["principal"]],
+        colour = .data[["scenario"]]
+      )
+    ) +
+    ggplot2::geom_line(linewidth = 1) +
+    ggplot2::geom_point(size = 2) +
+    ggplot2::geom_line(
+      ggplot2::aes(y = .data[["p10"]]),
+      linewidth = 0.5,
+      linetype = "dashed"
+    ) +
+    ggplot2::geom_line(
+      ggplot2::aes(y = .data[["p90"]]),
+      linewidth = 0.5,
+      linetype = "dashed"
+    ) +
+    ggplot2::geom_ribbon(
+      ggplot2::aes(
+        ymin = .data[["p90"]],
+        ymax = .data[["p10"]],
+        fill = .data[["scenario"]]
+      ),
+      alpha = 0.1
+    ) +
+    ggplot2::geom_hline(yintercept = baseline_level, linetype = "dotted") +
+    ggplot2::facet_wrap(
+      ~ eval(rlang::parse_expr(fct_scnr)),
+      nrow = 1,
+      # https://stackoverflow.com/q/68484123
+      labeller = ggplot2::labeller(fct_scnr = scenario_labels)
+    ) +
+    ggplot2::geom_text(
+      data = label_data,
+      ggplot2::aes(label = .data[["principal_label"]]),
+      colour = "grey15",
+      size = 6,
+      nudge_x = -1,
+      nudge_y = y_nudge
+    ) +
+    ggplot2::geom_text(
+      data = label_data,
+      ggplot2::aes(
+        y = .data[["p10"]],
+        label = .data[["p10_label"]]
+      ),
+      colour = "grey35",
+      size = 5,
+      nudge_x = -1,
+      nudge_y = y_nudge
+    ) +
+    ggplot2::geom_text(
+      data = label_data,
+      ggplot2::aes(
+        y = .data[["p90"]],
+        label = .data[["p90_label"]]
+      ),
+      colour = "grey35",
+      size = 5,
+      nudge_x = -1,
+      nudge_y = (y_nudge * -1)
+    ) +
+    ggplot2::scale_x_continuous(
+      breaks = c(2022, 2035),
+      labels = c("22/23", "35/36")
+    ) +
+    ggplot2::scale_y_continuous(
+      labels = scales::label_number(scale_cut = scales::cut_short_scale())
+    ) +
+    ggplot2::scale_colour_manual(values = scenario_colours) +
+    ggplot2::scale_fill_manual(values = scenario_colours) +
+    ggplot2::labs(
+      title = {{ plot_title }},
+      x = NULL,
+      y = NULL
+    ) +
+    StrategyUnitTheme::su_theme("Fira Sans") +
+    ggplot2::theme(
+      text = ggplot2::element_text(colour = "grey15", size = 20),
+      legend.position = "none",
+      strip.text = ggplot2::element_text(size = 24),
+      strip.background = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(size = 28, face = "bold"),
+      panel.spacing = grid::unit(0.5, "cm")
+    )
+  print(p)
+}
+
+
+plot_compare_individual_mitigators <- function(trust, measure, chg, bar_data) {
+  dual_colours <- purrr::keep_at(scenario_colours, c("planned", "ambitious"))
+  subtitle <- glue::glue(
+    "<span style='color: {dual_colours[[1]]};'>Planned</span> ",
+    "scenario projections compared to ",
+    "<span style='color: {dual_colours[[2]]};'>Ambitious</span> ",
+    "projections"
+  )
+  chg <- ifelse(chg == "efficiencies", "Efficiencies", "Activity avoidance")
+  top_10_mitigators <- bar_data |>
+    dplyr::filter(.data[["scenario"]] == "planned") |>
+    dplyr::slice_min(.data[["principal"]], n = 10) |>
+    dplyr::select("strategy")
+
+  p <- bar_data |>
+    dplyr::inner_join(top_10_mitigators, "strategy") |>
+    dplyr::arrange(
+      dplyr::desc(.data[["scenario"]]),
+      dplyr::desc(.data[["principal"]])
+    ) |>
+    dplyr::mutate(dplyr::across("strategy_name", forcats::fct_inorder)) |>
+    ggplot2::ggplot(
+      ggplot2::aes(
+        x = .data[["principal"]],
+        y = .data[["strategy_name"]],
+        fill = .data[["scenario"]]
+      )
+    ) +
+    ggplot2::geom_col(position = "dodge2") +
+    # ggplot2::geom_errorbarh(
+    #   ggplot2::aes(xmin = .data[["p10"]], xmax = .data[["p90"]]),
+    #   colour = "grey15",
+    #   position = "dodge2"
+    # ) +
+    ggplot2::scale_x_continuous(
+      breaks = scales::pretty_breaks(5),
+      labels = scales::comma
+    ) +
+    ggplot2::scale_y_discrete(labels = \(x) stringr::str_wrap(x, 40)) +
+    ggplot2::scale_fill_manual(values = dual_colours, guide = "none") +
+    ggplot2::labs(
+      title = glue::glue(
+        "{trust}: Top {measure} reduction strategies ({chg} only)"
+      ),
+      subtitle = subtitle,
+      x = NULL,
+      y = NULL
+    ) +
+    StrategyUnitTheme::su_theme("Fira Sans") +
+    ggplot2::theme(
+      text = ggplot2::element_text(colour = "grey15", size = 24),
+      plot.title = ggplot2::element_text(size = 28, face = "bold"),
+      plot.subtitle = ggtext::element_textbox(hjust = 1),
+      plot.title.position = "plot"
+    )
+  print(p)
+}
+
+
+plot_mitigation_level <- function(measure, level_data) {
+  dual_colours <- purrr::keep_at(scenario_colours, c("planned", "ambitious"))
+  title <- glue::glue(
+    "Potential % {measure} reduction relative to 'steady state' ",
+    "projected activity, by site"
+  )
+  subtitle <- glue::glue(
+    "<span style='color: {dual_colours[[1]]};'>Planned</span> ",
+    "scenario projections compared to ",
+    "<span style='color: {dual_colours[[2]]};'>Ambitious</span> ",
+    "projections.<br />",
+    "The absolute projected difference in activity relative to 'steady state' ",
+    "is also shown as a figure."
+  )
+  level_data <- level_data |>
+    dplyr::arrange(dplyr::desc(.data[["pct"]])) |>
+    dplyr::mutate(dplyr::across("site_name", forcats::fct_inorder))
+  level_text_data <- level_data |>
+    dplyr::mutate(
+      dplyr::across("pct", \(x) x + 0.004),
+      dplyr::across("delta", scales::comma),
+      clr = dplyr::if_else(.data[["scenario"]] == "planned", "white", "grey15")
+    )
+  p <- level_data |>
+    ggplot2::ggplot(ggplot2::aes(
+      x = .data[["pct"]],
+      y = .data[["site_name"]],
+      fill = .data[["scenario"]]
+    )) +
+    ggplot2::geom_col(position = "dodge2") +
+    ggplot2::geom_text(
+      data = level_text_data,
+      ggplot2::aes(label = .data[["delta"]], colour = .data[["clr"]]),
+      size = 6,
+      hjust = "left",
+      position = ggplot2::position_dodge2(width = 0.9)
+    ) +
+    ggplot2::scale_x_continuous(labels = scales::label_percent()) +
+    ggplot2::scale_fill_manual(values = dual_colours, guide = "none") +
+    ggplot2::scale_colour_identity() +
+    ggplot2::labs(
+      title = title,
+      subtitle = subtitle,
+      x = NULL,
+      y = NULL
+    ) +
+    StrategyUnitTheme::su_theme("Fira Sans") +
+    ggplot2::theme(
+      text = ggplot2::element_text(colour = "grey15", size = 24),
+      plot.title = ggplot2::element_text(size = 28, face = "bold"),
+      plot.subtitle = ggtext::element_textbox(hjust = 1),
+      plot.title.position = "plot"
+    )
+
+  print(p)
+}
+
+```
+
+
+### Charts to show projected admissions and bed-days by Trust
+
+These charts enable us to compare projected change in activity from the 2022/23
+baseline to the horizon in 2035/36, for each of three scenarios.
+
+
+```{r create jaws plots}
+default_data_overall_by_scheme |>
+  tidyr::nest(.by = c("site", "measure"), .key = "default_data") |>
+  purrr::pwalk(plot_slope_graph)
+
+```
+
+
+### Most impactful mitigation strategies, by Trust
+
+
+
+```{r create bar charts}
+bar_data |>
+  dplyr::rename(trust = "site", chg = "change_factor") |>
+  dplyr::filter(
+    .data[["measure"]] != "admissions" | .data[["chg"]] != "efficiencies"
+  ) |>
+  tidyr::nest(.by = c("trust", "measure", "chg"), .key = "bar_data") |>
+  purrr::pwalk(plot_compare_individual_mitigators)
+
+```
+
+
+### Potential levels of activity mitigation by site
+
+For "planned" and "ambitious" scenarios, how much of the activity in the
+"steady state" scenario might be mitigated?
+Bar length shows the level of mitigation as a percentage of "steady state"
+activity, with the absolute difference added as a label to each bar.
+
+The "planned" and "ambitious" projections used are just the principal
+projections (mean of all 256 model runs), with no 80% CI shown.
+
+
+```{r mitigation comparison bar charts}
+level_data |>
+  tidyr::nest(.by = "measure", .key = "level_data") |>
+  purrr::pwalk(plot_mitigation_level)
+
+```
+
+### Admissions and Beddays by site and POD
+
+This is to show the proportion of admissions and beddays that are daycases.
+
+```{r data tables daycases}
+pod_data |>
+  tidyr::pivot_wider(
+    names_from = "measure",
+    values_from = c("value", "pct"),
+    names_glue = "{measure}_{.value}"
+  ) |>
+  dplyr::select(!"site") |>
+  dplyr::rename_with(\(x) sub("_value$", "", x)) |>
+  dplyr::arrange(.data[["site_name"]], dplyr::desc(.data[["admissions_pct"]]))
+
+pod_data |>
+  convert_sites_to_trusts() |>
+  dplyr::rename(trust = "site") |>
+  dplyr::summarise(
+    dplyr::across("value", sum),
+    .by = c("trust", "measure", "pod")
+  ) |>
+  dplyr::mutate(
+    total = sum(.data[["value"]]),
+    .by = c("trust", "measure")
+  ) |>
+  dplyr::mutate(
+    pct = round((.data[["value"]] / .data[["total"]]) * 100, 1),
+    .by = c("trust", "measure", "pod")
+  ) |>
+  dplyr::select(!"total") |>
+    tidyr::pivot_wider(
+    names_from = "measure",
+    values_from = c("value", "pct"),
+    names_glue = "{measure}_{.value}"
+  ) |>
+  dplyr::rename_with(\(x) sub("_value$", "", x)) |>
+  dplyr::arrange(
+    dplyr::desc(.data[["trust"]]),
+    dplyr::desc(.data[["admissions_pct"]])
+  )
+
+```
+
+
+### Projections for admissions and bed-days by Trust and scenario
+
+```{r data tables 1}
+
+default_data_overall_by_scheme |>
+  dplyr::select(!c("site_name", "year")) |>
+  dplyr::rename(trust = "site", year = "estimate") |>
+  dplyr::mutate(dplyr::across(c("principal", "p10", "p90"), round)) |>
+  tidyr::pivot_longer(c("principal", "p10", "p90")) |>
+  dplyr::filter(.data[["year"]] == "horizon" | .data[["name"]] == "principal") |>
+  tidyr::pivot_wider(names_from = c("year", "name")) |>
+  dplyr::rename(baseline = "baseline_principal")
+
+
+```
+
+
+### Projections for admissions and bed-days by site and scenario
+
+
+```{r data tables 2}
+default_data |>
+  dplyr::mutate(dplyr::across(c("principal", "p10", "p90"), round))
+```
+
+
+### Projections for mitigation by Trust, scenario and strategy
+
+
+```{r data tables 3}
+bar_data |>
+  dplyr::rename(trust = "site") |>
+  dplyr::select(!"site_name") |>
+  dplyr::mutate(dplyr::across(c("principal", "p10", "p90"), round))
+
+```
