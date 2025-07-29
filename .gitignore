@@ -83,3 +83,15 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Serialised R data files
+/*.rds
+
+# Generated JSON parameter files
+*.json
+
+# Generated Excel copies of tidied results
+/*.xlsx
+
+# Quarto-generated HTML output
+/*.html
