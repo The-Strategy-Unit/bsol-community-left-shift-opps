@@ -67,7 +67,7 @@ read_azure_rds <- function(container_name, file) {
     AzureStor::storage_load_rds(glue::glue("{file}.rds"))
 }
 
-read_azure_data_csv <- function(container, file) {
+read_azure_csv <- function(container, file) {
   endpoint_uri <- Sys.getenv("AZ_STORAGE_EP")
 
   adls_endpoint <- AzureStor::adls_endpoint(
@@ -79,11 +79,6 @@ read_azure_data_csv <- function(container, file) {
   assertthat::assert_that(AzureStor::adls_file_exists(fs, filepath))
 
   AzureStor::storage_read_csv(container, filepath)
-
-  withr::with_tempfile("dl", {
-    AzureStor::download_adls_file(fs, filepath, dest = dl)
-    readr::read_csv(dl)
-  })
 }
 
 #' Get Azure storage blob container
