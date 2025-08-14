@@ -1,4 +1,3 @@
-# R code to take base.json and produce custom params files to feed into the API
 get_base_params <- function() {
   req <- httr2::request("https://api.github.com")
   resp <- req |>
@@ -23,6 +22,7 @@ get_base_params <- function() {
   })
 }
 
+
 create_custom_params <- function(dataset, scenario, ...) {
   assertthat::assert_that(
     rlang::is_scalar_character(dataset),
@@ -46,6 +46,7 @@ create_custom_params <- function(dataset, scenario, ...) {
     purrr::list_modify(dataset = dataset, scenario = scenario) |>
     purrr::list_modify(!!!supplied_params)
 }
+
 
 modify_demographic_factors_list <- function(params, ...) {
   default_list <- list(principal_proj = 1)

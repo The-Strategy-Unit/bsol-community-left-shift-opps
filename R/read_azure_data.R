@@ -1,26 +1,3 @@
-#' Read in BSol inputs data
-read_inputs_data_pqt <- function(file) {
-  endpoint_uri <- Sys.getenv("AZ_STORAGE_EP")
-  az_container <- Sys.getenv("AZ_INPUTS_CONTAINER")
-  nhp_version <- Sys.getenv("NHP_VERSION")
-  uhb <- "RRK" # University Hospitals Birmingham
-  mmu <- "RXK" # Sandwell and West Birmingham (MMU only)
-
-  adls_endpoint <- AzureStor::adls_endpoint(
-    endpoint_uri,
-    token = get_azure_token()
-  )
-  fs <- AzureStor::adls_filesystem(adls_endpoint, az_container)
-  filepath <- glue::glue("{nhp_version}/{file}.parquet")
-  assertthat::assert_that(AzureStor::adls_file_exists(fs, filepath))
-
-  withr::with_tempfile("dl", {
-    AzureStor::download_adls_file(fs, filepath, dest = dl)
-    arrow::read_parquet(dl) |>
-      dplyr::filter(.data[["provider"]] %in% c(uhb, mmu))
-  })
-}
-
 read_results_pqt <- function(scheme, scenario, tables = NULL) {
   tbl_names <- c(
     "acuity",
@@ -85,31 +62,12 @@ read_results_pqt <- function(scheme, scenario, tables = NULL) {
     rlang::set_names(names(named_paths))
 }
 
-read_inputs_data_rds <- function(file) {
-  endpoint_uri <- Sys.getenv("AZ_STORAGE_EP")
-  az_container <- Sys.getenv("AZ_INPUTS_CONTAINER")
-  nhp_version <- Sys.getenv("NHP_VERSION")
-
-  adls_endpoint <- AzureStor::adls_endpoint(
-    endpoint_uri,
-    token = get_azure_token()
-  )
-  fs <- AzureStor::adls_filesystem(adls_endpoint, az_container)
-  filepath <- glue::glue("{nhp_version}/{file}.rds")
-  assertthat::assert_that(AzureStor::adls_file_exists(fs, filepath))
-
-  withr::with_tempfile("dl", {
-    AzureStor::download_adls_file(fs, filepath, dest = dl)
-    readr::read_rds(dl)
-  })
-}
-
 read_azure_rds <- function(container_name, file) {
   get_blob_container(container_name) |>
     AzureStor::storage_load_rds(glue::glue("{file}.rds"))
 }
 
-read_azure_data_csv <- function(container, file) {
+read_azure_csv <- function(container, file) {
   endpoint_uri <- Sys.getenv("AZ_STORAGE_EP")
 
   adls_endpoint <- AzureStor::adls_endpoint(
@@ -121,11 +79,6 @@ read_azure_data_csv <- function(container, file) {
   assertthat::assert_that(AzureStor::adls_file_exists(fs, filepath))
 
   AzureStor::storage_read_csv(container, filepath)
-
-  withr::with_tempfile("dl", {
-    AzureStor::download_adls_file(fs, filepath, dest = dl)
-    readr::read_csv(dl)
-  })
 }
 
 #' Get Azure storage blob container

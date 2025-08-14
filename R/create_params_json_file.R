@@ -1,6 +1,7 @@
 create_params_json_file <- function(scheme, scenario_type) {
   base_params <- readr::read_rds(here::here("base_params.rds"))
   mitigator_lookup <- readr::read_rds(here::here("mitigator_lookup.rds"))
+  n_mitigators <- nrow(mitigator_lookup)
   scenario <- glue::glue("bsol-ndg3-{scenario_type}")
   run_dttm <- substr(sub(" ", "_", gsub("[:-]", "", Sys.time())), 1L, 15L)
   custom_params <- create_custom_params(
@@ -14,7 +15,7 @@ create_params_json_file <- function(scheme, scenario_type) {
     readr::read_rds(here::here("planned_intervals_data.rds"))
   } else if (scenario_type == "steady") {
     mitigator_lookup |>
-      dplyr::mutate(interval = purrr::map(seq(29), \(x) c(1, 1)))
+      dplyr::mutate(interval = purrr::map(seq(n_mitigators), \(x) c(1, 1)))
   }
   filename <- glue::glue("{tolower(scheme)}-{scenario_type}-{run_dttm}.json")
   json_out <- here::here("json", filename)

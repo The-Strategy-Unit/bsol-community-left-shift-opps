@@ -123,6 +123,7 @@ compile_planned_intervals <- function() {
   get_mitigator_lookup() |>
     dplyr::left_join(base_tbl, "strategy") |>
     dplyr::left_join(intervals_tbl, c("scheme", "strategy")) |>
+    # Rationale for these exclusions is here: https://github.com/The-Strategy-Unit/nhp_analysis/blob/cbf7e809419b516d6d8e2977fbf5d5c950263b7d/2025-02-28-wp1a-communties/wp1a.qmd#L159
     dplyr::filter(
       dplyr::if_any("strategy", \(x) !grepl("^virtual", x)) |
         dplyr::if_any(c("p10", "p90"), \(x) !is.na(x))
