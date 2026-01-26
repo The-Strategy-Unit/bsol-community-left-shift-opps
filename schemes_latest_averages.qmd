@@ -141,7 +141,7 @@ params_data <- params_data_init |>
 # check all names are found
 length(params_data) == length(preferred_run_names)
 
-init_cols <- c(
+core_elements <- c(
   "dataset",
   "scenario",
   "start_year",
@@ -150,9 +150,10 @@ init_cols <- c(
   "create_datetime"
 )
 params_data_tbl_summary <- params_data |>
-  purrr::map(\(x) purrr::keep_at(x, init_cols)) |>
+  purrr::map(\(x) purrr::keep_at(x, core_elements)) |>
   purrr::map(tibble::as_tibble_row) |>
-  purrr::list_rbind()
+  purrr::list_rbind() |>
+  dplyr::mutate(dplyr::across(tidyselect::ends_with("year"), as.integer))
 
 ```
 
@@ -208,7 +209,8 @@ efficiencies) and `strategy` fields are matched.
 tidy_intervals_tbl <- combined_intervals_tbl |>
   # only include "approved" list of strategies (excludes "bads_*"))
   dplyr::inner_join(tpma_lookup, c("change_factor", "strategy")) |>
-  # Rationale for these exclusions is here: https://github.com/The-Strategy-Unit/nhp_analysis/blob/cbf7e809419b516d6d8e2977fbf5d5c950263b7d/2025-02-28-wp1a-communties/wp1a.qmd#L159
+  # Rationale for these exclusions is here:
+  # https://github.com/The-Strategy-Unit/nhp_analysis/blob/cbf7e809419b516d6d8e2977fbf5d5c950263b7d/2025-02-28-wp1a-communties/wp1a.qmd#L159
   dplyr::filter(
     dplyr::if_any("strategy", \(x) !grepl("^virtual", x)) |
       dplyr::if_any(c("p10", "p90"), \(x) !is.na(x))
@@ -228,7 +230,7 @@ counts_summary <- tidy_intervals_tbl |>
   ) |>
   dplyr::arrange(dplyr::desc(.data[["n_runs_included"]]))
 
-counts_summary
+# counts_summary
 
 ```
 
@@ -242,66 +244,126 @@ runs.
 
 After filtering out some rogue values, we now have a `tidy_intervals_tbl` table
 with `r nrow(tidy_intervals_tbl)` rows.
+
+
+### Standardise intervals
+
+Because the provided intervals (`p10` and `p90` values) we are using were
+supplied as projections of activity avoidance / efficiencies over different time
+spans (eg some were 2019-2036, others 2023-2041, for example), we need to
+standardise each set of intervals to an annualised rate, before creating
+the mixture distributions, and then multiply up our results to a standard time
+period.
+
+
+```{r standardise projections}
+run_lookup <- params_data_tbl_summary |>
+  dplyr::select(!"app_version") |>
+  tidyr::unite(run_label, c("dataset", "scenario", "create_datetime"))
+
+annualise <- \(x, p) `^`(x, (1 / p))
+
+annualised_intervals_tbl <- tidy_intervals_tbl |>
+  dplyr::left_join(run_lookup, "run_label") |>
+  dplyr::mutate(
+    period = .data[["end_year"]] - .data[["start_year"]],
+    .keep = "unused"
+  ) |>
+  dplyr::mutate(
+    annualised_p10 = annualise(.data[["p10"]], .data[["period"]]),
+    annualised_p90 = annualise(.data[["p90"]], .data[["period"]]),
+    .keep = "unused"
+  )
+
+```
+
+
 Now we use a function to generate a distribution across all `p10` and `p90`
-values for each strategy, and report back the `p10`, `p50` and `p90` values
-for each of those distributions.
+values for each strategy.
+We then apply a "reinflation" function that converts the annualised p10 and p90
+values back to quantities that would apply over, in this case, 5 years or 7
+years.
+(This uses to the exponent of the annualised values to the power of 5 and 7
+respectively).
+We then report back the `p10`, `p50` and `p90` values for each of those
+reinflated distributions.
+
 
 ```{r create mixtures function}
-create_mixtures <- function(tidy_intervals_tbl) {
-  tidy_intervals_tbl |>
+create_mixtures <- function(intervals_tbl, colnames_vec) {
+  intervals_tbl |>
     dplyr::mutate(
-      mu = (.data[["p10"]] + .data[["p90"]]) / 2,
-      sigma = (.data[["p90"]] - .data[["mu"]]) /
+      mu = (.data[["annualised_p10"]] + .data[["annualised_p90"]]) / 2,
+      sigma = (.data[["annualised_p90"]] - .data[["mu"]]) /
         qnorm(p = 0.90, mean = 0, sd = 1),
       dplyr::across("sigma", \(x) dplyr::if_else(x == 0, 0.0001, x)),
       dist = purrr::map2(.data[["mu"]], .data[["sigma"]], \(m, s) {
         distr::Truncate(distr::Norm(mean = m, sd = s), lower = 0, upper = 1)
       })
     ) |>
-    dplyr::summarise(
-      dplyr::across("dist", list),
-      .by = c("type", "change_factor", "strategy", "strategy_name")
-    ) |>
+    dplyr::summarise(dplyr::across("dist", list), .by = colnames_vec) |>
     dplyr::mutate(
       mixture = purrr::map(.data[["dist"]], \(x) {
         distr::UnivarMixingDistribution(Dlist = x)
       }),
-      .keep = "unused"
-    ) |>
-    dplyr::mutate(
-      p10 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.1)),
-      p50 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.5)),
-      p90 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.9)),
       .keep = "unused"
     )
 }
 
 ```
 
-```{r create mixtures across all runs}
-#| warning: false
-#| cache: true
 
-final_table <- tidy_intervals_tbl |>
-  create_mixtures() |>
+```{r reinflation function}
+reinflate_intervals <- function(tbl, x, exp) {
+  dplyr::mutate(tbl, "{x}_{exp}yr" := `^`(.data[[x]], exp))
+}
+reinflate_5yr <- purrr::partial(reinflate_intervals, ... = , exp = 5)
+reinflate_7yr <- purrr::partial(reinflate_intervals, ... = , exp = 7)
+```
+
+```{r create mixtures across all runs then reinflate values}
+#| warning: false
+
+pcols <- c("p10", "p50", "p90")
+
+final_table <- annualised_intervals_tbl |>
+  create_mixtures(c("type", "change_factor", "strategy", "strategy_name")) |>
+  dplyr::mutate(
+    p10 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.1)),
+    p50 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.5)),
+    p90 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.9)),
+    .keep = "unused"
+  ) |>
+  purrr::reduce(pcols, reinflate_5yr, .init = _) |>
+  purrr::reduce(pcols, reinflate_7yr, .init = _) |>
+  dplyr::select(!tidyselect::all_of(pcols)) |>
   dplyr::mutate(dplyr::across("type", \(x) {
     forcats::fct(x, c("ip", "op", "aae"))
   })) |>
   dplyr::arrange(dplyr::pick(c("type", "change_factor")))
 
+
 ```
+
+
+NB if it is preferable to produce the table below pivoted to a long format,
+with three value columns p10, p50, p90, and a period identifier column (5yr
+projection or 7yr projection), this can easily be provided instead.
 
 ```{r display final table}
 final_table |>
-  dplyr::mutate(dplyr::across(c("p10", "p50", "p90"), \(x) round(x, 3)))
+  dplyr::mutate(dplyr::across(tidyselect::matches("^p[159]0"), \(x) {
+    round(x, 3)
+  }))
 ```
 
 
-```{r export to xlsx}
-#| eval: false
-#| include: false
+```{r export data}
 
 final_table |>
-  openxlsx2::write_xlsx("average_intervals_from_selected_tagged_runs.xlsx")
+  readr::write_rds("avg_intervals_from_selected_tagged_runs.rds")
+
+final_table |>
+  openxlsx2::write_xlsx("avg_intervals_from_selected_tagged_runs.xlsx")
 
 ```
