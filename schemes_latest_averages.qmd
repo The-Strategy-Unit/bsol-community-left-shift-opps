@@ -283,7 +283,7 @@ values for each strategy.
 We then apply a "reinflation" function that converts the annualised p10 and p90
 values back to quantities that would apply over, in this case, 5 years or 7
 years.
-(This uses to the exponent of the annualised values to the power of 5 and 7
+(This raises the annualised values to the power of 5 and 7
 respectively).
 We then report back the `p10`, `p50` and `p90` values for each of those
 reinflated distributions.
