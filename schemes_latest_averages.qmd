@@ -1,0 +1,369 @@
+---
+title: Calculate average from schemes
+df-print: kable
+---
+
+## Introduction
+
+This document generates a set of "average mitigation assumptions" for each of
+96 Types of Potentially Mitigatable Activity (TPMA).
+
+The results are shown in the final table of the document.
+They are also made available as an xlsx file.
+
+The document also shows some intermediate data objects for reference, and
+documents the assumptions made in the code in order to arrive at the final
+table, for checking and transparency.
+
+## Assumptions and decisions made about the process
+
+The assumptions made are, in summary:
+
+1. Only model runs tagged with any of the run stages listed below are used
+2. A maximum of 1 model run per scheme is included, based on a preference order
+  of run_stage tags
+3. Only `activity_avoidance` and `efficiencies` intervals are included
+4. All TPMAs are included, by default. The exception is a small number of TPMAs
+  labelled `bads_*`, which are excluded due to not matching the list provided in
+  a reference `mitigators.json` file.
+5. Intervals for all types of activity (inpatient, outpatient, aae) are
+  included, by default.
+6. `p10`, `p50` and `p90` values are reported, taken from the distributions
+  created from all interval values available for each TPMA, across all selected
+  model runs. Currently some intervals are only available in a small number of
+  model runs. It would be possible to filter out TPMAs from the final table
+  where the summary values are taken from a distribution based on small numbers
+  of model runs (eg 4 or fewer?).
+7. Out-of-range interval values provided by schemes are excluded. This includes
+  4 cases where schemes have provided p10/p90 values greater than 1, and one
+  case where a p10 value is given as 0.1 (ie 90% reduction in activity), which
+  is thought to be a user error.
+8. `p10`, `p50` and `p90` values are printed in the final table rounded to 3dp,
+  for presentational reasons. It is simple to provide these instead without
+  rounding if desired.
+
+Where these assumptions are not in line with what is required, it is simple to
+make changes to the process.
+Please contact Fran Barton with details of any amendments, or any questions.
+
+## Run stage tags in priority order
+
+Only runs with the following tags can be included, and for each scheme only 1
+run is chosen, based on the order of the following list (top priority at the
+top):
+
+* `final_report_ndg2`
+* `final_report_ndg3`
+* `final_report_ndg3_rd`
+* `final_report_ndg1`
+* `intermediate_ndg2`
+* `intermediate_ndg3`
+* `intermediate_ndg1`
+* `initial_ndg2`
+* `initial_ndg3`
+* `initial_ndg1`
+
+If a scheme has two tagged runs, one tagged `final_report_ndg2` and one
+`intermediate_ndg2`, only the former will be chosen.
+
+## Data process
+
+### Initial data
+
+We retrieve the params data for all tagged runs, from a `pins` board, and a
+csv file with a list of "mitigators" and their names.
+
+```{r get pinned params data}
+#| cache: true
+#| message: false
+board <- pins::board_connect(auth = "envvar")
+
+nhp_tagged_runs_meta <- board |>
+  pins::pin_read("matt.dray/nhp_tagged_runs_meta")
+
+params_data_init <- board |>
+  pins::pin_read("matt.dray/nhp_tagged_runs_params")
+
+tpma_lookup <- azkit::get_container("supporting-data") |>
+  azkit::read_azure_csv("mitigator-lookup.csv", col_types = "-ccc-----") |>
+  dplyr::rename(
+    change_factor = "mitigator_type",
+    strategy = "mitigator_variable",
+    strategy_name = "mitigator_name"
+  )
+```
+
+We begin with data for `r length(params_data_init)` runs.
+
+`tpma_lookup` provides a list of `r nrow(tpma_lookup)` "strategies".
+Later we will use this to ensure that only intervals for strategies included
+in this list are used in the final data output.
+
+```{r filter to preferred params per dataset}
+run_stages <- c(
+  "final_report_ndg2",
+  "final_report_ndg3",
+  "final_report_ndg3_rd",
+  "final_report_ndg1",
+  "intermediate_ndg2",
+  "intermediate_ndg3",
+  "intermediate_ndg1",
+  "initial_ndg2",
+  "initial_ndg3",
+  "initial_ndg1"
+)
+
+preferred_runs <- nhp_tagged_runs_meta |>
+  dplyr::filter(dplyr::if_any("run_stage", \(x) x %in% {{ run_stages }})) |>
+  dplyr::slice_min(
+    match(.data[["run_stage"]], {{ run_stages }}),
+    by = "dataset"
+  ) |>
+  dplyr::select(!"file")
+
+preferred_runs
+```
+
+The initial set of `r nrow(nhp_tagged_runs_meta)` is now filtered down to
+`r nrow(preferred_runs)` preferred runs.
+
+### Summary of selected runs to be included
+
+```{r filter params data to preferred runs per dataset only}
+preferred_run_names <- preferred_runs |>
+  glue::glue_data("{dataset}_{scenario}_{create_datetime}")
+
+length(preferred_run_names) # 24
+
+params_data <- params_data_init |>
+  purrr::keep_at(preferred_run_names)
+
+# check all names are found
+length(params_data) == length(preferred_run_names)
+
+core_elements <- c(
+  "dataset",
+  "scenario",
+  "start_year",
+  "end_year",
+  "app_version",
+  "create_datetime"
+)
+params_data_tbl_summary <- params_data |>
+  purrr::map(\(x) purrr::keep_at(x, core_elements)) |>
+  purrr::map(tibble::as_tibble_row) |>
+  purrr::list_rbind() |>
+  dplyr::mutate(dplyr::across(tidyselect::ends_with("year"), as.integer))
+
+```
+
+This table is not used in the further calculation below, but is shown here for
+information.
+
+```{r display summary table}
+params_data_tbl_summary |>
+  dplyr::arrange(.data[["create_datetime"]])
+```
+
+### Extract intervals from selected params
+
+Here we take the `activity_avoidance` and `efficiencies` elements of the params
+data only.
+For each of the 24 runs, and for each "strategy", we extract the provided `p10`
+and `p90` values and pivot these into columns in a data frame.
+
+```{r extract intervals}
+create_intervals_tbl <- function(lst) {
+  lst |>
+    purrr::map_depth(2, \(x) list(x[["interval"]])) |>
+    purrr::imap(\(x, y) dplyr::bind_cols(type = y, tibble::as_tibble_row(x))) |>
+    purrr::list_rbind() |>
+    tidyr::pivot_longer(
+      !"type",
+      names_to = "strategy",
+      values_drop_na = TRUE
+    ) |>
+    tidyr::unnest_wider("value", names_sep = "_") |>
+    dplyr::rename(p10 = "value_1", p90 = "value_2")
+}
+
+
+combined_intervals_tbl <- params_data |>
+  purrr::map(\(x) purrr::keep_at(x, c("activity_avoidance", "efficiencies"))) |>
+  purrr::map_depth(2, create_intervals_tbl) |>
+  purrr::map(\(x) purrr::list_rbind(x, names_to = "change_factor")) |>
+  purrr::list_rbind(names_to = "run_label")
+
+```
+
+The `combined_intervals_tbl` data frame contains
+`r nrow(combined_intervals_tbl)` rows.
+
+We then filter `combined_intervals_tbl` against the `tpma_lookup` table
+that was read in at the top of the document.
+Intervals are only retained if both their `change_factor` (activity_avoidance or
+efficiencies) and `strategy` fields are matched.
+
+```{r counts of combinations - number of runs as basis for mixtures}
+
+tidy_intervals_tbl <- combined_intervals_tbl |>
+  # only include "approved" list of strategies (excludes "bads_*"))
+  dplyr::inner_join(tpma_lookup, c("change_factor", "strategy")) |>
+  # Rationale for these exclusions is here:
+  # https://github.com/The-Strategy-Unit/nhp_analysis/blob/cbf7e809419b516d6d8e2977fbf5d5c950263b7d/2025-02-28-wp1a-communties/wp1a.qmd#L159
+  dplyr::filter(
+    dplyr::if_any("strategy", \(x) !grepl("^virtual", x)) |
+      dplyr::if_any(c("p10", "p90"), \(x) !is.na(x))
+  ) |>
+  dplyr::filter(
+    !grepl("^RH5", .data[["run_label"]]) |
+      .data[["strategy"]] != "virtual_wards_activity_avoidance_ari"
+  ) |>
+  dplyr::filter(dplyr::if_all(c("p10", "p90"), \(x) {
+    dplyr::between(x, 0, 1) # 4 rows are set at above 1
+  }))
+
+counts_summary <- tidy_intervals_tbl |>
+  dplyr::summarise(
+    n_runs_included = dplyr::n(),
+    .by = c("type", "change_factor", "strategy", "strategy_name")
+  ) |>
+  dplyr::arrange(dplyr::desc(.data[["n_runs_included"]]))
+
+# counts_summary
+
+```
+
+The `counts_summary` table above shows that in all cases the set of intervals
+for a given "strategy" is less than the potential maximum of 24 (which would be
+where intervals were provided in every selected run), and in some cases the set
+is very small; for example, the intervals being provided in only 1 of the 24
+runs.
+
+### Create distributions and compile final table
+
+After filtering out some rogue values, we now have a `tidy_intervals_tbl` table
+with `r nrow(tidy_intervals_tbl)` rows.
+
+
+### Standardise intervals
+
+Because the provided intervals (`p10` and `p90` values) we are using were
+supplied as projections of activity avoidance / efficiencies over different time
+spans (eg some were 2019-2036, others 2023-2041, for example), we need to
+standardise each set of intervals to an annualised rate, before creating
+the mixture distributions, and then multiply up our results to a standard time
+period.
+
+
+```{r standardise projections}
+run_lookup <- params_data_tbl_summary |>
+  dplyr::select(!"app_version") |>
+  tidyr::unite(run_label, c("dataset", "scenario", "create_datetime"))
+
+annualise <- \(x, p) `^`(x, (1 / p))
+
+annualised_intervals_tbl <- tidy_intervals_tbl |>
+  dplyr::left_join(run_lookup, "run_label") |>
+  dplyr::mutate(
+    period = .data[["end_year"]] - .data[["start_year"]],
+    .keep = "unused"
+  ) |>
+  dplyr::mutate(
+    annualised_p10 = annualise(.data[["p10"]], .data[["period"]]),
+    annualised_p90 = annualise(.data[["p90"]], .data[["period"]]),
+    .keep = "unused"
+  )
+
+```
+
+
+Now we use a function to generate a distribution across all `p10` and `p90`
+values for each strategy.
+We then apply a "reinflation" function that converts the annualised p10 and p90
+values back to quantities that would apply over, in this case, 5 years or 7
+years.
+(This raises the annualised values to the power of 5 and 7
+respectively).
+We then report back the `p10`, `p50` and `p90` values for each of those
+reinflated distributions.
+
+
+```{r create mixtures function}
+create_mixtures <- function(intervals_tbl, colnames_vec) {
+  intervals_tbl |>
+    dplyr::mutate(
+      mu = (.data[["annualised_p10"]] + .data[["annualised_p90"]]) / 2,
+      sigma = (.data[["annualised_p90"]] - .data[["mu"]]) /
+        qnorm(p = 0.90, mean = 0, sd = 1),
+      dplyr::across("sigma", \(x) dplyr::if_else(x == 0, 0.0001, x)),
+      dist = purrr::map2(.data[["mu"]], .data[["sigma"]], \(m, s) {
+        distr::Truncate(distr::Norm(mean = m, sd = s), lower = 0, upper = 1)
+      })
+    ) |>
+    dplyr::summarise(dplyr::across("dist", list), .by = colnames_vec) |>
+    dplyr::mutate(
+      mixture = purrr::map(.data[["dist"]], \(x) {
+        distr::UnivarMixingDistribution(Dlist = x)
+      }),
+      .keep = "unused"
+    )
+}
+
+```
+
+
+```{r reinflation function}
+reinflate_intervals <- function(tbl, x, exp) {
+  dplyr::mutate(tbl, "{x}_{exp}yr" := `^`(.data[[x]], exp))
+}
+reinflate_5yr <- purrr::partial(reinflate_intervals, ... = , exp = 5)
+reinflate_7yr <- purrr::partial(reinflate_intervals, ... = , exp = 7)
+```
+
+```{r create mixtures across all runs then reinflate values}
+#| warning: false
+
+pcols <- c("p10", "p50", "p90")
+
+final_table <- annualised_intervals_tbl |>
+  create_mixtures(c("type", "change_factor", "strategy", "strategy_name")) |>
+  dplyr::mutate(
+    p10 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.1)),
+    p50 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.5)),
+    p90 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.9)),
+    .keep = "unused"
+  ) |>
+  purrr::reduce(pcols, reinflate_5yr, .init = _) |>
+  purrr::reduce(pcols, reinflate_7yr, .init = _) |>
+  dplyr::select(!tidyselect::all_of(pcols)) |>
+  dplyr::mutate(dplyr::across("type", \(x) {
+    forcats::fct(x, c("ip", "op", "aae"))
+  })) |>
+  dplyr::arrange(dplyr::pick(c("type", "change_factor")))
+
+
+```
+
+
+NB if it is preferable to produce the table below pivoted to a long format,
+with three value columns p10, p50, p90, and a period identifier column (5yr
+projection or 7yr projection), this can easily be provided instead.
+
+```{r display final table}
+final_table |>
+  dplyr::mutate(dplyr::across(tidyselect::matches("^p[159]0"), \(x) {
+    round(x, 3)
+  }))
+```
+
+
+```{r export data}
+
+final_table |>
+  readr::write_rds("avg_intervals_from_selected_tagged_runs.rds")
+
+final_table |>
+  openxlsx2::write_xlsx("avg_intervals_from_selected_tagged_runs.xlsx")
+
+```
