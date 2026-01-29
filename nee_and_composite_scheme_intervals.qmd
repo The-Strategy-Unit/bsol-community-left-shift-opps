@@ -1,5 +1,5 @@
 ---
-title: Calculate average from schemes
+title: Calculate composite intervals from selected schemes' final report params
 df-print: kable
 lightbox: true
 code-block-border-left: "#5f9ea0"
@@ -202,7 +202,8 @@ combined_intervals_tbl <- params_data |>
   purrr::map(\(x) purrr::list_rbind(x, names_to = "change_factor")) |>
   purrr::list_rbind(names_to = "run_label") |>
   # only include "approved" list of strategies (excludes "bads_*"))
-  dplyr::inner_join(tpma_lookup, c("change_factor", "strategy"))
+  dplyr::inner_join(tpma_lookup, c("change_factor", "strategy")) |>
+  dplyr::relocate("strategy_name", .after = "strategy")
 
 ```
 
@@ -319,51 +320,12 @@ patchworks[["aae"]]
 
 
 ```{r tidy intervals summary}
-#| eval: false
+#| eval: !expr params$export
 combined_intervals_tbl |>
   dplyr::arrange(.data[["p10"]]) |>
   openxlsx2::write_xlsx("scheme_supplied_intervals.xlsx")
 
 ```
-
-```{r counts of combinations - number of runs as basis for mixtures}
-#| echo: false
-
-# ONCE WE HAVE AN AGREED LIST OF SCHEME INTERVALS TO INCLUDE WE WILL MAKE THIS
-# INTO A TABLE AND THEN FILTER combined_intervals_tbl AGAINST THIS USING
-# anti_join(), INSTEAD OF THE CURRENT PROCESS BELOW
-
-tidy_intervals_tbl <- combined_intervals_tbl |>
-  # Rationale for these exclusions is here:
-  # https://github.com/The-Strategy-Unit/nhp_analysis/blob/cbf7e809419b516d6d8e2977fbf5d5c950263b7d/2025-02-28-wp1a-communties/wp1a.qmd#L159
-  dplyr::filter(
-    dplyr::if_any("strategy", \(x) !grepl("^virtual", x)) |
-      dplyr::if_any(c("p10", "p90"), \(x) !is.na(x))
-  ) |>
-  dplyr::filter(
-    !grepl("^RH5", .data[["run_label"]]) |
-      .data[["strategy"]] != "virtual_wards_activity_avoidance_ari"
-  ) |>
-  dplyr::filter(dplyr::if_all(c("p10", "p90"), \(x) {
-    dplyr::between(x, 0, 1) # 4 rows are set at above 1
-  }))
-
-# counts_summary <- tidy_intervals_tbl |>
-#   dplyr::summarise(
-#     n_schemes = dplyr::n(),
-#     .by = c("type", "change_factor", "strategy", "strategy_name")
-#   ) |>
-#   dplyr::arrange(dplyr::desc(.data[["n_schemes"]]))
-
-# counts_summary
-
-```
-
-<!-- The `counts_summary` table above shows that in all cases the set of intervals
-for a given "strategy" is less than the potential maximum of 24 (which would be
-where intervals were provided in every selected run), and in some cases the set
-is very small; for example, the intervals being provided in only 1 of the 24
-runs. -->
 
 
 ### Create distributions and compile final table
@@ -388,6 +350,9 @@ run_lookup <- params_data_tbl_summary |>
 
 annualise <- \(x, p) `^`(x, (1 / p))
 
+tidy_intervals_tbl <- combined_intervals_tbl |>
+  dplyr::filter(dplyr::if_all(c("p10", "p90"), \(x) dplyr::between(x, 0, 1)))
+
 annualised_intervals_tbl <- tidy_intervals_tbl |>
   dplyr::left_join(run_lookup, "run_label") |>
   dplyr::mutate(
@@ -406,7 +371,7 @@ annualised_intervals_tbl <- tidy_intervals_tbl |>
 ```{r annualise nee intervals}
 #| filename: "annualise nee intervals"
 
-nee_period <- 15
+nee_period <- 20 # years between baseline and horizon
 
 annualised_nee_intervals_tbl <- nee_intervals |>
   dplyr::mutate(
@@ -541,11 +506,29 @@ final_nee_table <- annualised_nee_intervals_tbl |>
 ```{r create joined table for schemes and nee figures}
 #| filename: "create joined table for schemes and nee figures"
 
+nee_tbl <- final_nee_table |>
+  dplyr::select(!c("strategy_name", "change_factor"))
+# dplyr::select(!"change_factor")
 final_joined_table <- final_scheme_table |>
-  dplyr::select(!c("strategy_name", "change_factor")) |>
-  dplyr::left_join(final_nee_table, c("type", "strategy")) |>
-  dplyr::select(!c("strategy", "change_factor")) |>
-  dplyr::relocate("strategy_name", .after = "type")
+  dplyr::select(!"change_factor") |>
+  dplyr::left_join(nee_tbl, c("type", "strategy")) |>
+  tidyr::pivot_longer(
+    tidyselect::matches("p[159]0"),
+    names_to = c("name", "interval", "period"),
+    names_sep = "_"
+  ) |>
+  tidyr::pivot_wider() |>
+  dplyr::mutate(dplyr::across("nee", \(x) {
+    dplyr::coalesce(x, .data[["schemes"]])
+  })) |>
+  tidyr::pivot_longer(
+    c("schemes", "nee"),
+    names_to = "source",
+    cols_vary = "slowest"
+  ) |>
+  tidyr::pivot_wider(names_from = c("source", "period", "interval")) |>
+  # NEE p50 values don't actually exist - introduced through pivoting
+  dplyr::select(!tidyselect::matches("^nee.*p50$"))
 
 ```
 
@@ -559,42 +542,49 @@ final_joined_table |>
 #| eval: !expr params$export
 #| echo: false
 
-final_scheme_table |>
-  readr::write_rds("truncated_composite_scheme_intervals.rds")
+# final_scheme_table |>
+#   readr::write_rds("truncated_composite_scheme_intervals.rds")
 
-final_nee_table |>
-  readr::write_rds("truncated_nee_intervals.rds")
+# final_nee_table |>
+#   readr::write_rds("truncated_nee_intervals.rds")
 
-final_scheme_table |>
-  tidyr::pivot_longer(tidyselect::matches("p[159]0")) |>
-  tidyr::separate("name", c("source", "name", "period")) |>
-  tidyr::pivot_wider() |>
-  readr::write_rds("truncated_composite_scheme_intervals.rds")
+# final_scheme_table |>
+#   tidyr::pivot_longer(tidyselect::matches("p[159]0")) |>
+#   tidyr::separate("name", c("source", "name", "period")) |>
+#   dplyr::select(!"source") |>
+#   tidyr::pivot_wider() |>
+#   readr::write_rds("truncated_composite_scheme_intervals.rds")
 
 final_joined_table |>
-  # fill in, by coalescing, missing NEE values first?
+  readr::write_rds("nee_and_composite_scheme_intervals.rds")
+final_joined_table |>
+  dplyr::select(!tidyselect::ends_with("p50")) |>
   tidyr::pivot_longer(
-    tidyselect::matches("p[159]0"),
-    names_to = c("source", "interval", "period"),
+    tidyselect::matches("p[19]0$"),
+    names_to = c("source", "period", "name"),
     names_sep = "_"
   ) |>
+  tidyr::pivot_wider() |>
   readr::write_rds("nee_and_composite_scheme_intervals_long.rds")
 
-final_nee_table |>
-  tidyr::pivot_longer(tidyselect::matches("^p[159]0")) |>
-  tidyr::separate("name", c("name", "period")) |>
-  tidyr::pivot_wider() |>
-  readr::write_rds("truncated_nee_intervals_longer.rds")
+# final_nee_table |>
+#   tidyr::pivot_longer(tidyselect::matches("p[159]0")) |>
+#   tidyr::separate("name", c("source", "name", "period")) |>
+#   dplyr::select(!"source") |>
+#   tidyr::pivot_wider() |>
+#   readr::write_rds("truncated_nee_intervals_longer.rds")
 
 final_scheme_table |>
   openxlsx2::write_xlsx("truncated_composite_scheme_intervals.xlsx")
 final_joined_table |>
   openxlsx2::write_xlsx("nee_and_composite_scheme_intervals.xlsx")
 final_joined_table |>
+  dplyr::select(!tidyselect::ends_with("p50")) |>
   tidyr::pivot_longer(
-    tidyselect::matches("p[159]0"),
-    names_to = c("source", "interval", "period"),
+    tidyselect::matches("p[19]0$"),
+    names_to = c("source", "period", "name"),
     names_sep = "_"
   ) |>
+  tidyr::pivot_wider() |>
   openxlsx2::write_xlsx("nee_and_composite_scheme_intervals_long.xlsx")
 ```
