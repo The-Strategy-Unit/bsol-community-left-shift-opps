@@ -1,0 +1,83 @@
+---
+title: "BSol and BC ICBs: construction of custom params files"
+author:
+  name: Fran Barton
+  email: francis.barton@nhs.net
+date: 3 February 2026
+lang: en-GB
+theme: lumen
+embed-resources: true
+minimal: true
+df-print: kable
+mainfont: Fira Sans
+---
+
+
+```{r functions}
+
+purrr::walk(dir("R", full.names = TRUE), source)
+
+create_params_json <- function(dataset, scenario, intervals_data, ...) {
+  base_params <- get_base_params()
+  scenario_label <- glue::glue("bhm-tabletop-ndg3-{scenario}")
+  run_dttm <- substr(sub(" ", "_", gsub("[:-]", "", Sys.time())), 1L, 15L)
+  custom_params <- create_custom_params(
+    dataset,
+    scenario_label,
+    seed = 85969L,
+    end_year = ifelse(grepl("5yr$", scenario), 2028L, 2030L),
+    create_datetime = run_dttm
+  )
+  basename <- glue::glue("{tolower(dataset)}_{scenario}_{run_dttm}")
+  base_params |>
+    purrr::list_modify(!!!custom_params) |>
+    set_ndg3_values() |>
+    modify_demographic_factors() |>
+    insert_strategy_intervals(int_data) |>
+    insert_linear_time_profiles(int_data) |>
+    write_params_json_file(basename)
+}
+
+```
+
+
+
+```{r intervals data}
+intervals_data <- readr::read_rds("nee_and_composite_scheme_intervals.rds") |>
+  dplyr::mutate(
+    interval = purrr::map2(.data[["p10"]], .data[["p90"]], c),
+    .keep = "unused"
+  ) |>
+  dplyr::mutate(
+    dplyr::across("strategy", \(x) {
+      dplyr::if_else(
+        grepl("^ambulatory_emergency_care", x),
+        sub("^ambulatory", "same_day", x),
+        x
+      )
+    }),
+    dplyr::across("interval", \(x) purrr::map(x, \(x) list(interval = x)))
+  ) |>
+  tidyr::unite("scenario", c("source", "period")) |>
+  tidyr::nest(.by = "scenario", .key = "intervals_data")
+
+```
+
+
+
+```{r create-a da params files}
+
+json_files_vec <- tibble::tibble(dataset = rep(c("QHL", "QUA"), 2)) |>
+  dplyr::bind_cols(intervals_data) |>
+  tidyr::expand(dataset, tidyr::nesting(scenario, intervals_data)) |>
+  purrr::pmap(create_params_json)
+
+validate_json <- create_json_validator_fn(read_nhp_schema_as_str())
+validation_data <- json_files_vec |>
+  purrr::map(\(x) validate_json(x, verbose = TRUE))
+
+if (!all(validation_data)) {
+  validation_data[which(!validation_data)][[1]]
+}
+
+```

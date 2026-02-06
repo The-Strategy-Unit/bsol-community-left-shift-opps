@@ -1,0 +1,2 @@
+[lint]
+ignore = ["fixed_regex"]
