@@ -1,3 +1,5 @@
+post_params_to_api <- function(params_file) {
+  params_json <- yyjsonr::read_json_file(params_file)
   req <- httr2::request(check_getenv("NHP_API_URI"))
   req |>
     httr2::req_url_path_append("api") |>

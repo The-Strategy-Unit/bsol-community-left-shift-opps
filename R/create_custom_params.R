@@ -12,58 +12,86 @@ get_base_params <- function() {
   httr2::resp_check_status(resp)
   httr2::resp_check_content_type(resp, "application/json")
 
-  withr::with_tempfile("out", {
-    httr2::resp_body_json(resp) |>
-      purrr::pluck("content") |>
-      # GitHub API returns file content base64-encoded
-      base64enc::base64decode() |>
-      writeBin(out)
-    jsonlite::fromJSON(out)
-  })
+  httr2::resp_body_json(resp) |>
+    purrr::pluck("content") |>
+    # GitHub API returns file content base64-encoded
+    base64enc::base64decode() |>
+    yyjsonr::read_json_raw()
 }
 
 
 create_custom_params <- function(dataset, scenario, ...) {
-  assertthat::assert_that(
-    rlang::is_scalar_character(dataset),
-    rlang::is_scalar_character(scenario)
-  )
   supplied_params <- rlang::dots_list(...)
-  run_dttm <- substr(sub(" ", "_", gsub("[:-]", "", Sys.time())), 1L, 15L)
+  nhp_user <- supplied_params[["user"]] %||% Sys.getenv("NHP_API_USER", NA)
+  assertthat::assert_that(!is.na(nhp_user))
   param_defaults <- list(
-    user = Sys.getenv("NHP_API_USER"),
-    seed = 43447,
-    model_runs = 256,
-    start_year = 2022,
-    end_year = 2035,
-    app_version = Sys.getenv("NHP_APP_VERSION") %||% "dev",
+    user = nhp_user,
+    model_runs = 256L,
+    start_year = 2023L,
+    end_year = 2035L,
+    app_version = Sys.getenv("NHP_VERSION", "dev"),
     viewable = FALSE,
-    create_datetime = run_dttm,
     health_status_adjustment = TRUE
   )
-  assertthat::assert_that(purrr::none(param_defaults, is.null))
   param_defaults |>
     purrr::list_modify(dataset = dataset, scenario = scenario) |>
     purrr::list_modify(!!!supplied_params)
 }
 
 
-modify_demographic_factors_list <- function(params, ...) {
-  default_list <- list(principal_proj = 1)
-  custom_list <- purrr::list_modify(default_list, ...)
-  params |>
-    purrr::modify_in("demographic_factors", \(x) {
-      purrr::assign_in(x, "variant_probabilities", custom_list)
+insert_strategy_intervals <- function(lst, interval_data) {
+  interval_data_lst <- interval_data |>
+    tidyr::nest(.by = "change_factor") |>
+    tibble::deframe() |>
+    purrr::map(\(x) tidyr::nest(x, .by = "type")) |>
+    purrr::map(tibble::deframe) |>
+    purrr::map_depth(2, tibble::deframe) |>
+    # efficiencies have to have a type as well as an interval
+    purrr::modify_at("efficiencies", \(x) {
+      x |>
+        # most have type = "all"...
+        purrr::map_depth(2, \(x) purrr::list_merge(x, type = "all")) |>
+        # but some are different
+        purrr::modify_at("ip", adjust_ip_efficiencies)
+    })
+  purrr::list_modify(lst, !!!interval_data_lst)
+}
+
+
+adjust_ip_efficiencies <- function(efficiencies_ip_list) {
+  efficiencies_ip_list |>
+    purrr::modify_at(\(x) grepl("^same_day_emergency_care", x), \(x) {
+      purrr::list_modify(x, type = "sdec")
+    }) |>
+    purrr::modify_at(\(x) grepl("^day_procedures.*dc$", x), \(x) {
+      purrr::list_modify(x, type = "day_procedures_daycase")
+    }) |>
+    purrr::modify_at(\(x) grepl("^day_procedures.*op$", x), \(x) {
+      purrr::list_modify(x, type = "day_procedures_outpatients")
+    }) |>
+    purrr::modify_at(\(x) grepl("^pre-op_los", x), \(x) {
+      purrr::list_modify(x, type = "pre-op")
+    }) |>
+    purrr::modify_at("pre-op_los_1-day", \(x) {
+      purrr::list_merge(x, `pre-op_days` = 1L)
+    }) |>
+    purrr::modify_at("pre-op_los_2-day", \(x) {
+      purrr::list_merge(x, `pre-op_days` = 2L)
     })
 }
 
 
-modify_base_params <- function(base_params, custom_params) {
-  purrr::list_modify(base_params, !!!custom_params)
+modify_demographic_factors <- function(lst, ...) {
+  default_demogr_list <- list(migration_category = 1L)
+  custom_demogr_list <- purrr::list_modify(default_demogr_list, ...)
+  lst |>
+    purrr::modify_in("demographic_factors", \(x) {
+      purrr::assign_in(x, "variant_probabilities", custom_demogr_list)
+    })
 }
 
 
-negate_covid_adjustment <- function(params_list) {
+negate_covid_adjustment <- function(lst) {
   # Using NULL fails JSON validation as the schema requires `"minItems": 2`
   # hence here we use `c(1, 1)` which negates adjustment, though this is
   # a less neat solution than just using NULL to generate an empty `{}`.
@@ -73,7 +101,7 @@ negate_covid_adjustment <- function(params_list) {
     rlang::set_names(c("elective", "non-elective", "maternity"))
   aae_list <- purrr::map(seq(2), \(x) c(1, 1)) |>
     rlang::set_names(c("ambulance", "walk-in"))
-  params_list |>
+  lst |>
     purrr::modify_at("covid_adjustment", \(x) {
       x |>
         purrr::assign_in("op", op_list) |>
@@ -83,35 +111,29 @@ negate_covid_adjustment <- function(params_list) {
 }
 
 
-set_linear_time_profiles <- function(lst, mitigator_lookup) {
-  deframe_tbl <- function(tbl) {
-    tbl |>
-      dplyr::select("strategy") |>
-      dplyr::mutate(linear = "linear") |>
-      tibble::deframe() |>
-      as.list()
-  }
-  activity_avoidance_list <- mitigator_lookup |>
-    dplyr::filter(.data[["mitigator_type"]] == "activity_avoidance") |>
-    deframe_tbl()
-  efficiencies_list <- mitigator_lookup |>
-    dplyr::filter(.data[["mitigator_type"]] == "efficiencies") |>
-    deframe_tbl()
+insert_linear_time_profiles <- function(lst, interval_data) {
+  time_profiles_lst <- interval_data |>
+    dplyr::select(!"interval") |>
+    dplyr::mutate(linear = "linear") |>
+    tidyr::nest(.by = "change_factor") |>
+    tibble::deframe() |>
+    purrr::map(\(x) tidyr::nest(x, .by = "type")) |>
+    purrr::map(tibble::deframe) |>
+    purrr::map_depth(2, tibble::deframe)
+
   lst |>
-    purrr::modify_at("time_profile_mappings", \(x) {
-      x |>
-        purrr::assign_in(c("efficiencies", "ip"), efficiencies_list) |>
-        purrr::assign_in(c("activity_avoidance", "ip"), activity_avoidance_list)
+    purrr::modify_in("time_profile_mappings", \(x) {
+      purrr::list_merge(x, !!!time_profiles_lst)
     })
 }
 
 
-set_ndg3_values <- function(params) {
-  new_ip_values <- list(c(1.000, 1.027), c(0.996, 1.027), c(1, 1)) |>
+set_ndg3_values <- function(lst) {
+  new_ip_values <- list(c(0.9999, 1.0271), c(0.9963, 1.0268), c(1, 1)) |>
     rlang::set_names(c("elective", "non-elective", "maternity"))
-  new_op_values <- purrr::map(seq(3), \(x) c(1.000, 1.049)) |>
+  new_op_values <- purrr::map(seq(3), \(x) c(1.0002, 1.0487)) |>
     rlang::set_names(c("first", "followup", "procedure"))
-  new_aae_values <- purrr::map(seq(2), \(x) c(0.995, 1.035)) |>
+  new_aae_values <- purrr::map(seq(2), \(x) c(0.9946, 1.0352)) |>
     rlang::set_names(c("ambulance", "walk-in"))
   values_list <- list(
     ip = new_ip_values,
@@ -120,6 +142,5 @@ set_ndg3_values <- function(params) {
   )
   assign_list <- list("ndg3", "year-on-year-growth", values_list) |>
     rlang::set_names(c("variant", "value-type", "values"))
-  params |>
-    purrr::assign_in("non-demographic_adjustment", assign_list)
+  purrr::assign_in(lst, "non-demographic_adjustment", assign_list)
 }
