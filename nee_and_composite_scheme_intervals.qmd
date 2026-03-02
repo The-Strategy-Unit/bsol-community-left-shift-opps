@@ -1,7 +1,26 @@
 ---
 title: Calculate composite intervals from selected schemes' final report params
+author:
+  name: Fran Barton
+  email: francis.barton@nhs.net
+date: 30 January 2026
+lang: en-GB
+theme: lumen
+embed-resources: true
+minimal: true
+fig-dpi: 96
+fig-responsive: true
+lightbox: true
+out-width: 92%
+knitr:
+  opts_chunk:
+    dev: ragg_png
+    message: false
+execute:
+  warning: true
 df-print: kable
 lightbox: true
+mainfont: Fira Sans
 ---
 
 ## Introduction
@@ -45,7 +64,6 @@ We also retrieve a set of NEE (national expert elicitation) values for 78 TPMAs.
 
 ```{r get pinned params data}
 #| cache: true
-#| message: false
 #| filename: "get pinned params data"
 board <- pins::board_connect(auth = "envvar")
 
@@ -201,23 +219,12 @@ combined_intervals_tbl <- params_data |>
 The `combined_intervals_tbl` data frame contains
 `r nrow(combined_intervals_tbl)` rows.
 
-Table of values supplied by schemes that are contain either a zero value or a
-value greater than 1:
-
-```{r show extreme interval values}
-#| filename: "show extreme interval values"
-#| eval: false
-#| echo: false
-combined_intervals_tbl |>
-  dplyr::filter(dplyr::if_any(c("p10", "p90"), \(x) x == 0 | x > 1))
-
-```
 
 ### Visualising scheme-supplied intervals
 
-This will help us notice supplied values that don't look right, and may cause
-problems when creating the distributions (later) from which we will take the
-"average" values.
+This will help us notice supplied values that don't look right, and that may
+cause problems when creating the distributions (later) from which we will create
+our composite values.
 
 ```{r lollipop plot functions}
 #| filename: "lollipop plot functions"
@@ -325,25 +332,37 @@ combined_intervals_tbl |>
 ```{r remove rows with inapplicable values}
 #| filename: "remove rows with inapplicable values"
 
-# 6 rows were identified through inspection to contain inapplicable values
+# 12 rows were identified through inspection to contain inapplicable values
 remove_rows <- combined_intervals_tbl |>
+  dplyr::select(c("run_label", "strategy")) |>
   dplyr::filter(
     (grepl("^RH5", .data[["run_label"]]) &
-      grepl("activity_avoidance_ari$", .data[["strategy"]])) |
+      .data[["strategy"]] == "virtual_wards_activity_avoidance_ari") |
       (grepl("^RAS", .data[["run_label"]]) &
         (grepl("adult_non-surgical$", .data[["strategy"]]) |
-          grepl("pre-op_los_1-day", .data[["strategy"]])))
-  ) |>
-  dplyr::select(c("run_label", "strategy"))
+          .data[["strategy"]] == "pre-op_los_1-day")) |
+      (grepl("^RGN", .data[["run_label"]]) &
+        grepl("^discharged_no_treatment_.*_ambulance$", .data[["strategy"]])) |
+      (grepl("^RTX", .data[["run_label"]]) &
+        .data[["strategy"]] %in%
+          c(
+            "stroke_early_supported_discharge",
+            "virtual_wards_efficiencies_ari",
+            "raid_ip",
+            "virtual_wards_efficiencies_heart_failure"
+          ))
+  )
 
-# nrow(remove_rows) == 6 # check
+nrow(remove_rows) == 12 # check
 
 # We also remove any rows where p10 or p90 are not between 0 and 1
 tidy_intervals_tbl <- combined_intervals_tbl |>
   dplyr::anti_join(remove_rows, c("run_label", "strategy")) |>
+  # values greater than 1 should have already been removed in the above step,
+  # but just to make sure:
   dplyr::filter(dplyr::if_all(c("p10", "p90"), \(x) dplyr::between(x, 0, 1)))
 
-# nrow(combined_intervals_tbl) - nrow(tidy_intervals_tbl) == 10 # check
+nrow(combined_intervals_tbl) - nrow(tidy_intervals_tbl) == 12 # check
 
 ```
 
@@ -422,7 +441,6 @@ create_mixtures <- function(intervals_tbl, colnames_vec) {
 ```
 
 ```{r create mixtures across all scheme runs}
-#| warning: false
 #| cache: true
 #| filename: "create mixtures across all scheme runs"
 
@@ -453,7 +471,6 @@ mixture_dists_plotting_data <- scheme_mixtures_tbl |>
 ```{r generate distribution plots}
 #| filename: "generate distribution plots"
 #| fig-height: 36
-#| eval: true
 mixture_dists_plotting_data |>
   dplyr::mutate(
     strategy_label = stringr::str_wrap(gsub("_", " ", .data[["strategy"]]), 20)
@@ -465,16 +482,29 @@ mixture_dists_plotting_data |>
 
 ```
 
+A table to show the `p10`, `p50` and `p90` values taken from the scheme mixture
+distribution for each strategy:
+
+```{r pull out intervals from scheme mixtures}
+#| filename: "pull out intervals from scheme mixtures"
+
+scheme_intervals_full <- scheme_mixtures_tbl |>
+  dplyr::mutate(
+    p10 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.1)),
+    p50 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.5)),
+    p90 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.9)),
+    .keep = "unused"
+  )
+
+scheme_intervals_full
+
+```
 
 ```{r reinflate values}
 #| filename: "reinflate values"
 
-scheme_intervals <- scheme_mixtures_tbl |>
-  dplyr::mutate(
-    p10 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.1)),
-    p90 = purrr::map_dbl(.data[["mixture"]], \(m) m@q(p = 0.9)),
-    .keep = "unused"
-  )
+scheme_intervals <- scheme_intervals_full |>
+  dplyr::select(!"p50")
 
 init_joined_table <- list(scheme_intervals, annualised_nee_intervals) |>
   rlang::set_names(c("schemes", "nee")) |>
@@ -490,7 +520,7 @@ final_joined_table <- inflation_periods |>
   purrr::map(\(x) reinflate_intervals(x, init_joined_table)) |>
   rlang::set_names(paste0(inflation_periods, "yr")) |>
   purrr::list_rbind(names_to = "period") |>
-  # pivt_wider creates NA values in the table, where we are missing a NEE value
+  # pivot_wider creates NA values in the table, where we are missing a NEE value
   tidyr::pivot_wider(
     names_from = c("source", "period"),
     names_glue = "{source}_{period}_{.value}",
@@ -502,7 +532,6 @@ final_joined_table <- inflation_periods |>
     names_sep = "_",
     cols_vary = "slowest"
   ) |>
-  # dplyr::arrange(.data[["value"]]) |>
   dplyr::mutate(dplyr::across("type", \(x) {
     forcats::fct(x, c("ip", "op", "aae"))
   })) |>
