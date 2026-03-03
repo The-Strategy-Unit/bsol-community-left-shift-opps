@@ -2,7 +2,7 @@
 title: Modelled potential avoidable activity by 2035-36, Birmingham & Solihull ICB
 author:
   name: Fran Barton
-  email: franbarton@gmail.com
+  email: francis.barton@nhs.net
 date: 16 July 2025
 lang: en-GB
 theme: lumen
@@ -314,7 +314,10 @@ plot_slope_graph <- function(default_data, site, measure) {
     rlang::set_names(scenarios)
 
   k_labeller <- scales::label_number(1, scale_cut = scales::cut_short_scale())
-  num_labeller <- scales::label_number(0.1, scale_cut = scales::cut_short_scale())
+  num_labeller <- scales::label_number(
+    0.1,
+    scale_cut = scales::cut_short_scale()
+  )
 
   baseline_level <- default_data |>
     dplyr::filter(.data[["year"]] == 2022L) |>
@@ -628,7 +631,7 @@ pod_data |>
     .by = c("trust", "measure", "pod")
   ) |>
   dplyr::select(!"total") |>
-    tidyr::pivot_wider(
+  tidyr::pivot_wider(
     names_from = "measure",
     values_from = c("value", "pct"),
     names_glue = "{measure}_{.value}"
@@ -651,7 +654,9 @@ default_data_overall_by_scheme |>
   dplyr::rename(trust = "site", year = "estimate") |>
   dplyr::mutate(dplyr::across(c("principal", "p10", "p90"), round)) |>
   tidyr::pivot_longer(c("principal", "p10", "p90")) |>
-  dplyr::filter(.data[["year"]] == "horizon" | .data[["name"]] == "principal") |>
+  dplyr::filter(
+    .data[["year"]] == "horizon" | .data[["name"]] == "principal"
+  ) |>
   tidyr::pivot_wider(names_from = c("year", "name")) |>
   dplyr::rename(baseline = "baseline_principal")
 
