@@ -350,7 +350,8 @@ remove_rows <- combined_intervals_tbl |>
             "virtual_wards_efficiencies_ari",
             "raid_ip",
             "virtual_wards_efficiencies_heart_failure"
-          ))
+          )
+      )
   )
 
 nrow(remove_rows) == 12 # check
