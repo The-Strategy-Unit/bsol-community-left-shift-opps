@@ -1,13 +1,13 @@
 compile_ambitious_intervals <- function() {
   # provides 23 of the 29 mitigators
-  neecom_strategies <- get_blob_container(Sys.getenv("AZ_SUPPORT_CONTAINER")) |>
+  neecom_strategies <- get_blob_container(check_getenv("AZ_SUPPORT_CONTAINER")) |>
     AzureStor::storage_load_rds("neecom_table.rds", type = "gzip") |>
     dplyr::select(c(strategy = "strategy_variable", "p10", "p90")) |>
     dplyr::filter(.data[["strategy"]] %in% community_strategies())
 
   # provides 6 of the 29 mitigators
   nee_subset <- stringr::str_subset(community_strategies(), "medicines|child")
-  nee_strategies <- get_blob_container(Sys.getenv("AZ_SUPPORT_CONTAINER")) |>
+  nee_strategies <- get_blob_container(check_getenv("AZ_SUPPORT_CONTAINER")) |>
     AzureStor::storage_load_rds("nee_table.rds", type = "none") |>
     dplyr::select(c(
       strategy = "param_name",
@@ -27,7 +27,7 @@ compile_ambitious_intervals <- function() {
 }
 
 get_mitigator_lookup <- function() {
-  get_blob_container(Sys.getenv("AZ_SUPPORT_CONTAINER")) |>
+  get_blob_container(check_getenv("AZ_SUPPORT_CONTAINER")) |>
     AzureStor::storage_read_csv(
       "mitigator-lookup.csv",
       col_types = "-ccc-----"

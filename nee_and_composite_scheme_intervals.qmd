@@ -74,7 +74,7 @@ params_data_init <- board |>
   pins::pin_read("matt.dray/nhp_tagged_runs_params")
 
 tpma_lookup <- azkit::get_container("supporting-data") |>
-  azkit::read_azure_csv("mitigator-lookup.csv") |> View()
+  azkit::read_azure_csv("mitigator-lookup.csv", col_types = "-ccc-----") |>
   dplyr::rename(
     change_factor = "mitigator_type",
     strategy = "mitigator_variable",
@@ -504,15 +504,15 @@ scheme_intervals_full
 ```{r reinflate values}
 #| filename: "reinflate values"
 
-scheme_intervals <- scheme_intervals_full
-# dplyr::select(!"p50")
+scheme_intervals <- scheme_intervals_full |>
+  dplyr::select(!"p50")
 
 init_joined_table <- list(scheme_intervals, annualised_nee_intervals) |>
   rlang::set_names(c("schemes", "nee")) |>
   dplyr::bind_rows(.id = "source")
 
 reinflate_intervals <- function(exp, tbl) {
-  dplyr::mutate(tbl, dplyr::across(c("p10", "p50", "p90"), \(x) x^exp))
+  dplyr::mutate(tbl, dplyr::across(c("p10", "p90"), \(x) x^exp))
 }
 
 inflation_periods <- c(5, 7) # years to horizon
@@ -525,10 +525,10 @@ final_joined_table <- inflation_periods |>
   tidyr::pivot_wider(
     names_from = c("source", "period"),
     names_glue = "{source}_{period}_{.value}",
-    values_from = c("p10", "p50", "p90")
+    values_from = c("p10", "p90")
   ) |>
   tidyr::pivot_longer(
-    tidyselect::matches("p[159]0$"),
+    tidyselect::matches("p[19]0$"),
     names_to = c("source", "period", "name"),
     names_sep = "_",
     cols_vary = "slowest"
@@ -557,7 +557,7 @@ final_joined_table <- inflation_periods |>
 ```{r display final joined table}
 #| filename: "display final joined table"
 final_joined_table |>
-  dplyr::mutate(dplyr::across(c("p10", "p50", "p90"), \(x) round(x, 3)))
+  dplyr::mutate(dplyr::across(c("p10", "p90"), \(x) round(x, 3)))
 ```
 
 ```{r export data}
@@ -565,7 +565,6 @@ final_joined_table |>
 #| eval: false
 
 final_joined_table |>
-  dplyr::select(!"p50") |>
   readr::write_rds("nee_and_composite_scheme_intervals.rds")
 
 ```

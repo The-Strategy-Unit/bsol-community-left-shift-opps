@@ -19,9 +19,9 @@ read_results_pqt <- function(scheme, scenario, tables = NULL) {
     tables <- rlang::arg_match(tables, values = tbl_names, multiple = TRUE)
   }
 
-  endpoint_uri <- Sys.getenv("AZ_STORAGE_EP")
-  az_container <- Sys.getenv("AZ_RESULTS_CONTAINER")
-  nhp_version <- Sys.getenv("NHP_VERSION")
+  endpoint_uri <- check_getenv("AZ_STORAGE_EP")
+  az_container <- check_getenv("AZ_RESULTS_CONTAINER")
+  nhp_version <- check_getenv("NHP_VERSION")
 
   adls_endpoint <- AzureStor::adls_endpoint(
     endpoint_uri,
@@ -68,7 +68,7 @@ read_azure_rds <- function(container_name, file) {
 }
 
 read_azure_csv <- function(container, file) {
-  endpoint_uri <- Sys.getenv("AZ_STORAGE_EP")
+  endpoint_uri <- check_getenv("AZ_STORAGE_EP")
 
   adls_endpoint <- AzureStor::adls_endpoint(
     endpoint_uri,
@@ -85,7 +85,7 @@ read_azure_csv <- function(container, file) {
 #' @param container_name string: name of the container
 #' @param ... arguments to be passed on to `get_azure_token()`
 get_blob_container <- function(container_name, ...) {
-  endpoint_uri <- Sys.getenv("AZ_STORAGE_EP")
+  endpoint_uri <- check_getenv("AZ_STORAGE_EP")
   token <- get_azure_token(...)
   endpoint_uri |>
     AzureStor::blob_endpoint(token = token) |>
