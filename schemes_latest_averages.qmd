@@ -79,9 +79,7 @@ tpma_lookup <- readr::read_csv(
 #| filename: "get nee values"
 #| cache: true
 
-nee_intervals <- azkit::get_container("supporting-data") |>
-  AzureStor::storage_load_rds("nee_table.rds", type = "none") |>
-  # azkit::read_azure_rds("nee_table.rds") |>
+nee_intervals <- readr::read_rds("reference/nee_table.rds") |>
   dplyr::rename_with(stringr::str_to_snake) |>
   dplyr::select(c(
     change_factor = "type",
