@@ -64,8 +64,10 @@ nhp_tagged_runs_meta <- board |>
 params_data_init <- board |>
   pins::pin_read("matt.dray/nhp_tagged_runs_params")
 
-tpma_lookup <- azkit::get_container("supporting-data") |>
-  azkit::read_azure_csv("mitigator-lookup.csv", col_types = "-ccc-----") |>
+tpma_lookup <- readr::read_csv(
+  "reference/mitigator-lookup.csv",
+  col_types = "c"
+) |>
   dplyr::rename(
     change_factor = "mitigator_type",
     strategy = "mitigator_variable",
